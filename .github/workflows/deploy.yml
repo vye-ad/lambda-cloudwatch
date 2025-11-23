@@ -1,5 +1,10 @@
 name: Deploy Next.js to EC2 + Log to Lambda
 
+# ADD THIS PERMISSIONS BLOCK – THIS FIXES THE GHCR ERROR
+permissions:
+  contents: read   # Needed for checkout
+  packages: write  # Needed to push to GHCR
+
 on:
   push:
     branches: [ main ]

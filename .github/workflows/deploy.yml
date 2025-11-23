@@ -1,0 +1,85 @@
+name: Deploy Next.js to EC2 + Log to Lambda
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  # ──────────────────────────────
+  # Job 1: Build & Push Docker image
+  # ──────────────────────────────
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}/app:latest
+
+  # ──────────────────────────────
+  # Job 2: Deploy to EC2 + Call Lambda
+  # ──────────────────────────────
+  deploy-to-ec2:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            # Log in to GHCR from the EC2 server
+            docker login ghcr.io -u ${{ github.actor }} -p ${{ secrets.GITHUB_TOKEN }}
+
+            # Pull the fresh image we just built
+            docker pull ghcr.io/${{ github.repository }}/app:latest
+
+            # Stop and remove old container (if any)
+            docker stop app-container || true
+            docker rm app-container || true
+
+            # Run the new container on port 80 → http://yourec2ip works!
+            docker run -d \
+              --name app-container \
+              -p 80:3000 \
+              --restart unless-stopped \
+              ghcr.io/${{ github.repository }}/app:latest
+
+      - name: Notify Lambda – Success or Failure
+        if: always()   # ← THIS IS CRITICAL: runs even if deployment fails
+        run: |
+          # Decide status
+          if [[ "${{ job.status }}" == "success" ]]; then
+            STATUS="success"
+          else
+            STATUS="failure"
+          fi
+
+          echo "Deployment outcome → $STATUS"
+
+          # Call your Lambda function with all the details
+          curl -X POST "${{ secrets.LAMBDA_URL }}" \
+               -H "Content-Type: application/json" \
+               -d '{
+                 "status": "'$STATUS'",
+                 "branch": "${{ github.ref_name }}",
+                 "commit": "${{ github.sha }}",
+                 "timestamp": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'"
+               }' || echo "Lambda call failed – but workflow continues"
